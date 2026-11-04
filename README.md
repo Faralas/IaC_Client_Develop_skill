@@ -7,11 +7,42 @@ environment (**Develop / QA / UAT / PROD**).
 
 ## Install
 
+Global (available in every project):
+
 ```bash
-npx skills add Faralas/IaC_Client_Develop_skill
+npx skills add Faralas/iac-terraform-skill -g -a claude-code
 ```
 
-Or copy the folder into `~/.claude/skills/iac-terraform/` (or into the repo's `.claude/skills/`).
+Current project only (installs into the project's skills folder):
+
+```bash
+npx skills add Faralas/iac-terraform-skill -a claude-code
+```
+
+Manual alternative: clone into `~/.claude/skills/iac-terraform/` (or into the repo's `.claude/skills/iac-terraform/`).
+
+```bash
+git clone https://github.com/Faralas/iac-terraform-skill.git ~/.claude/skills/iac-terraform
+```
+
+## Update
+
+```bash
+npx skills check                  # list skills with available updates
+npx skills update iac-terraform   # update this skill
+```
+
+If you installed it with `git clone`:
+
+```bash
+git -C ~/.claude/skills/iac-terraform pull
+```
+
+## Uninstall
+
+```bash
+npx skills remove iac-terraform
+```
 
 ## Contents
 
