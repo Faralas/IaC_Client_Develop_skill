@@ -1,24 +1,59 @@
 # File templates
 
-## Resources/<provider>_<type>/
+## Resource — `terraform/resources/azure_key_vault/`
 
 ```hcl
-# keyVault.tf
+# main.tf
 resource "azurerm_key_vault" "this" {
-  name                       = var.azure_keyVault_name
-  location                   = var.azure_keyVault_location
-  resource_group_name        = var.azure_keyVault_resourceGroupName
-  tenant_id                  = var.azure_keyVault_tenantId
-  sku_name                   = var.azure_keyVault_skuName
-  soft_delete_retention_days = var.azure_keyVault_retentionDays
-  purge_protection_enabled   = var.azure_keyVault_purgeProtection
+  name                       = var.name
+  location                   = var.location
+  resource_group_name        = var.resource_group_name
+  tenant_id                  = var.tenant_id
+  sku_name                   = var.sku_name
+  soft_delete_retention_days = var.retention_days
+  purge_protection_enabled   = var.purge_protection
+  tags                       = var.tags
+  # Enable RBAC authorization with the argument your azurerm version supports
+  # (enable_rbac_authorization, renamed rbac_authorization_enabled in later 4.x releases).
 }
 ```
 
 ```hcl
-# output.tf — a single object
-output "azure_key_vault_output" {
-  description = "Key Vault object"
+# variables.tf
+variable "name"                { type = string }
+variable "location"            { type = string }
+variable "resource_group_name" { type = string }
+variable "tenant_id"           { type = string }
+
+variable "sku_name" {
+  type    = string
+  default = "standard"
+  validation {
+    condition     = contains(["standard", "premium"], var.sku_name)
+    error_message = "sku_name must be standard or premium."
+  }
+}
+
+variable "retention_days" {
+  type    = number
+  default = 7
+}
+
+variable "purge_protection" {
+  type    = bool
+  default = true
+}
+
+variable "tags" {
+  type    = map(string)
+  default = {}
+}
+```
+
+```hcl
+# outputs.tf — a single object
+output "key_vault_output" {
+  description = "Key Vault attributes."
   value = {
     id        = azurerm_key_vault.this.id
     name      = azurerm_key_vault.this.name
@@ -27,131 +62,193 @@ output "azure_key_vault_output" {
 }
 ```
 
-## Modules/<Phase>_IaC_<Domain>/
+## Middle module — `terraform/modules/security/`
 
 ```hcl
 # main.tf
-module "azure_log_analytics" {
-  source                                        = "../../Resources/azure_log_analytics"
-  azure_logAnalyticsWorkspace_name              = var.azure_logAnalyticsWorkspace_name
-  azure_logAnalyticsWorkspace_location          = var.location
-  azure_logAnalyticsWorkspace_resourceGroupName = var.resource_group_name
-  azure_logAnalyticsWorkspace_sku               = var.azure_logAnalyticsWorkspace_sku
-  azure_logAnalyticsWorkspace_retentionInDays   = var.azure_logAnalyticsWorkspace_retentionInDays
+module "key_vault" {
+  source              = "../../resources/azure_key_vault"
+  name                = var.key_vault_name
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  tenant_id           = var.tenant_id
+  sku_name            = var.key_vault_sku_name
+  tags                = var.tags
 }
 
-module "azure_app_insights" {
-  source                                      = "../../Resources/azure_app_insights"
-  azure_applicationInsights_name              = var.azure_applicationInsights_name
-  azure_applicationInsights_location          = var.location
-  azure_applicationInsights_resourceGroupName = var.resource_group_name
-  azure_applicationInsights_applicationType   = var.azure_applicationInsights_applicationType
-  azure_applicationInsights_workspaceId       = module.azure_log_analytics.azure_log_analytics_output.id
+module "identity" {
+  source              = "../../resources/azure_user_assigned_identity"
+  name                = var.identity_name
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  tags                = var.tags
+}
+
+resource "azurerm_role_assignment" "identity_kv_secrets" {
+  scope                = module.key_vault.key_vault_output.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = module.identity.user_assigned_identity_output.principal_id
 }
 ```
 
 ```hcl
-# output.tf — object + flat outputs, always read from the resource's object
-output "log_analytics"    { value = module.azure_log_analytics.azure_log_analytics_output }
-output "log_analytics_id" { value = module.azure_log_analytics.azure_log_analytics_output.id }
-output "app_insights_connection_string" {
-  value     = module.azure_app_insights.azure_app_insights_output.connection_string
-  sensitive = true
-}
+# outputs.tf — object + flat outputs, always read from the Resource's object
+output "key_vault"    { value = module.key_vault.key_vault_output }
+output "key_vault_id" { value = module.key_vault.key_vault_output.id }
+output "identity_id"  { value = module.identity.user_assigned_identity_output.id }
 ```
 
-## Envs/<Env>/<Phase>/
-
 ```hcl
-# backend.tf — partial configuration; values arrive via -backend-config
+# versions.tf
 terraform {
-  backend "azurerm" {}
+  required_providers {
+    azurerm = { source = "hashicorp/azurerm", version = ">= 4.0" }
+  }
+}
+```
+
+## Root — `terraform/env/`
+
+```hcl
+# backend.tf — partial configuration; values come from -backend-config in CI
+terraform {
+  backend "azurerm" {
+    key = "dev.terraform.tfstate"
+  }
+}
+```
+
+```hcl
+# versions.tf
+terraform {
+  required_version = ">= 1.8, < 2.0"
+  required_providers {
+    azurerm = { source = "hashicorp/azurerm", version = "~> 4.39" }
+  }
 }
 ```
 
 ```hcl
 # providers.tf
-terraform {
-  required_version = ">= 1.8, < 2.0"
-  required_providers {
-    azurerm = { source = "hashicorp/azurerm", version = "~> 4.39" }
-    azapi   = { source = "Azure/azapi", version = "~> 2.0" }
-  }
+provider "azurerm" {
+  features {}
+  subscription_id = var.subscription_id
 }
-provider "azurerm" { features {} }
-provider "azapi" {}
 ```
 
 ```hcl
-# local.tf
+# locals.tf
 locals {
-  _org    = lower(var.naming_org)
-  _rc     = lower(var.region_code)
-  _tenant = lower(var.tenant_abbr)
-  _inst   = lower(var.instance_count)
+  _base  = format("%s-%s-%s", lower(var.workload), lower(var.environment), lower(var.region_code))
+  _alnum = replace(local._base, "/[^a-z0-9]/", "")
 
-  _clean = "/[^a-z0-9-]/"
-  _alnum = "/[^a-z0-9]/"
+  names = {
+    rg      = "rg-${local._base}"
+    law     = "log-${local._base}"
+    kv      = substr("kv-${local._base}-${var.instance}", 0, 24)
+    st      = substr("st${local._alnum}${var.instance}", 0, 24)
+    plan    = "asp-${local._base}"
+    web     = "app-${local._base}-${var.instance}"
+    appi    = "appi-${local._base}"
+    id      = "id-${local._base}"
+  }
 
-  name_rg  = replace(format("rg-%s-%s-%s-%s", local._org, local._rc, local._tenant, local._inst), local._clean, "")
-  name_kv  = substr(replace(format("kv-%s-%s-%s", local._org, local._tenant, local._inst), local._clean, ""), 0, 24)
-  name_stg = substr(replace(format("st%s%s%s%s", local._org, local._rc, local._tenant, local._inst), local._alnum, ""), 0, 24)
-
-  # names from earlier phases (lookups)
-  name_region_rg  = format("rg-%s-%s-%s", local._org, local._rc, lower(var.region_count))
-  name_region_sql = format("sql-%s-%s-%s", local._org, local._rc, lower(var.region_count))
-  name_plan_rg    = format("rg-%s-%s-%s-%s", local._org, local._rc, lower(var.plan_size), lower(var.plan_count))
-  name_plan_plan  = format("plan-%s-%s-%s-%s", local._org, local._rc, lower(var.plan_size), lower(var.plan_count))
+  tags = merge(var.tags, {
+    environment = var.environment
+    workload    = var.workload
+    managed_by  = "terraform"
+  })
 }
 ```
 
 ```hcl
-# main.tf (Client phase)
-module "resource_group" {
-  source                       = "../../../Resources/azure_resource_group"
-  azure_resourceGroup_name     = local.name_rg
-  azure_resourceGroup_location = var.location
+# main.tf
+data "azurerm_client_config" "current" {}
+
+module "foundation" {
+  source              = "../modules/foundation"
+  resource_group_name = local.names.rg
+  log_analytics_name  = local.names.law
+  location            = var.location
+  tags                = local.tags
 }
 
-data "azurerm_service_plan" "plan" {
-  name                = local.name_plan_plan
-  resource_group_name = local.name_plan_rg
-}
-
-module "common" {
-  count      = var.enable_common ? 1 : 0
-  source     = "../../../Modules/Client_IaC_Common"
-  # …
-  depends_on = [module.resource_group]
+module "security" {
+  source              = "../modules/security"
+  key_vault_name      = local.names.kv
+  identity_name       = local.names.id
+  location            = var.location
+  resource_group_name = module.foundation.resource_group_name   # reference = order
+  tenant_id           = data.azurerm_client_config.current.tenant_id
+  key_vault_sku_name  = var.key_vault_sku_name
+  tags                = local.tags
 }
 
 module "application" {
-  count  = var.enable_application ? 1 : 0
-  source = "../../../Modules/Client_IaC_Application"
-  azure_functionWindows_storageAccountName = module.common[0].storage_account_name
-  # …
-  depends_on = [module.common]
-}
-
-# Dependency between flags. Module blocks do not support lifecycle/precondition;
-# a check block warns at plan time, and a validation (TF >= 1.9 can reference
-# other variables) turns it into an error.
-variable "enable_application" {
-  type    = bool
-  default = true
-  validation {
-    condition     = !var.enable_application || var.enable_common
-    error_message = "enable_application requires enable_common = true."
-  }
+  count               = var.enable_application ? 1 : 0
+  source              = "../modules/application"
+  web_app_name        = local.names.web
+  service_plan_name   = local.names.plan
+  location            = var.location
+  resource_group_name = module.foundation.resource_group_name
+  identity_id         = module.security.identity_id
+  tags                = local.tags
 }
 ```
 
 ```hcl
-# output.tf
-output "common" {
-  value = length(module.common) > 0 ? {
-    key_vault_id = try(module.common[0].key_vault_id, null)
-    storage_id   = try(module.common[0].storage_account_id, null)
-  } : null
+# variables.tf (excerpt)
+variable "subscription_id" { type = string }
+variable "workload"        { type = string }
+variable "environment"     { type = string }   # e.g. "dev"
+variable "region_code"     { type = string }   # e.g. "eus"
+variable "location"        { type = string }   # e.g. "eastus"
+
+variable "instance" {
+  type    = string
+  default = "01"
+}
+
+variable "enable_application" {
+  type    = bool
+  default = true
+}
+
+variable "key_vault_sku_name" {
+  type    = string
+  default = "standard"
+}
+
+variable "tags" {
+  type    = map(string)
+  default = {}
+}
+```
+
+```hcl
+# terraform.tfvars (versioned, no secrets)
+workload           = "shop"
+environment        = "dev"
+region_code        = "eus"
+location           = "eastus"
+enable_application = true
+key_vault_sku_name = "standard"
+tags               = { cost_center = "it-dev" }
+```
+
+```hcl
+# outputs.tf
+output "resource_group_name" { value = module.foundation.resource_group_name }
+output "key_vault_uri"       { value = module.security.key_vault.vault_uri }
+output "web_app_hostname" {
+  value = try(module.application[0].web_app_default_hostname, null)
+}
+```
+
+```hcl
+# moved.tf — rename without destroy/recreate
+moved {
+  from = module.app
+  to   = module.application[0]
 }
 ```

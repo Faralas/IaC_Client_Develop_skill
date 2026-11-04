@@ -1,61 +1,66 @@
 # Common mistakes
 
-🔴 breaks or deploys to the wrong place · 🟠 silently wrong · 🟡 tech debt
+🔴 breaks or deploys something unintended · 🟠 silently wrong · 🟡 tech debt
+
+## Structure
+
+| Sev. | Mistake | Symptom | Fix |
+|---|---|---|---|
+| 🔴 | The parent reads `module.x.id` while the child exposes `x_output` (an object) | `Unsupported attribute` | `module.x.x_output.id`, or add a flat output |
+| 🔴 | Root output referencing an undeclared module | `Reference to undeclared module` | Remove it or declare the module |
+| 🔴 | Required Resource variable not passed by the middle module | `Missing required argument` | Wire it, e.g. from a sibling Resource's output |
+| 🔴 | `provider` blocks inside modules | modules cannot be used with `count`/`for_each`; provider removal errors | Providers only in the root; modules declare `required_providers` only |
+| 🔴 | Renaming a module or resource without `moved {}` | plan destroys and recreates resources | Add a `moved` block in the same change |
+| 🟠 | `try(module.x[0].attr, null)` with a misspelled `attr` | output is always `null`, no error | Check names; use `try` only for the `count = 0` case |
+| 🟠 | The module receives a variable and does not forward it (e.g. `tags`) | the resource is created without it | Forward it, or remove it from the interface |
+| 🟠 | Dependent flags not validated (`module.data[0]` with `enable_data=false`) | `Invalid index` | `validation` or `check` block |
+| 🟠 | `depends_on` on whole modules | broad "known after apply", slow and noisy plans | Use output references; scope `depends_on` to resources |
+| 🟠 | Data source reading a resource created in the same root without referencing it | `not found` on the first apply | Reference the resource, or drop the data source |
+| 🟡 | Module per resource type ("module of a module") with no domain | deep trees and long variable plumbing | Group by domain and lifecycle |
+| 🟡 | Providers declared but unused | slower `init` | Remove them |
+| 🟡 | Variables without `type` / `description` | unexpected coercion, unclear interface | Always set them |
+| 🟡 | Mixed naming styles (camelCase + snake_case) | wiring mistakes | snake_case everywhere |
+
+## Naming
+
+| Sev. | Mistake | Symptom | Fix |
+|---|---|---|---|
+| 🟠 | `replace(x, "[^a-z0-9-]", "")` without slashes | invalid characters reach the API | `"/[^a-z0-9-]/"` |
+| 🟠 | Truncation computed but not used | Storage name > 24 characters | Pass the truncated name |
+| 🟠 | Globally unique name without an instance suffix | `already exists`, or soft delete blocks reuse | Add an instance suffix or a deterministic hash |
+| 🟠 | Names built inside modules | inconsistent names, hard to predict | Build them in root `locals.tf` only |
+| 🟠 | Region not supported by a type | provider error at apply | A dedicated `location` variable for that type |
+
+## Variables and state
+
+| Sev. | Mistake | Symptom | Fix |
+|---|---|---|---|
+| 🔴 | Secrets in `terraform.tfvars` or in defaults | secrets in git history | `TF_VAR_*` from Key Vault, or generate them and store in Key Vault |
+| 🔴 | Local state, or state committed to git | lost or conflicting state, secrets leaked | Remote backend with locking; ignore `*.tfstate*` |
+| 🔴 | Backend created by the same root that uses it | chicken-and-egg problem; destroy deletes the state | Bootstrap the backend separately |
+| 🟠 | The same variable set in several sources (tfvars + `TF_VAR_` + `-var`) | the value depends on precedence | One source per variable |
+| 🟠 | Sensitive output without `sensitive = true` | secret printed in plan/apply logs | Mark it sensitive |
+| 🟠 | `count`/`for_each` based on values known only after apply | `Invalid count argument` | Base them on variables or locals |
+| 🟡 | `.terraform.lock.hcl` not committed | different provider versions per machine | Commit it; lock for every platform |
 
 ## Pipeline
 
 | Sev. | Mistake | Symptom | Fix |
 |---|---|---|---|
-| 🔴 | Pipeline copied from another environment without adapting it (groups, service connection, working dir) | "Develop" deploys to another environment with another environment's code | Parameterize by `env` from a template; check those 4 points in every PR |
-| 🔴 | Phases run out of order | `plan` fails on `data.*` ("not found") | Region → Plan → Client; chain them with stages or triggers |
-| 🟠 | State container name with uppercase letters | `az storage fs create` fails | `tr '[:upper:]' '[:lower:]'` |
-| 🟠 | Plan + apply `-auto-approve` in the same step | destructive changes without review | Separate stages + an `environment` with approval |
-| 🟠 | Variable missing from the group | literal `$(x)` reaches Terraform | Pre-check; single quotes |
-| 🟡 | Declared parameters that are never used | noise, confusion | Use them (metadata/outputs) or remove them |
-| 🟡 | Terraform downloaded without a checksum or a pinned version | non-reproducible builds | Official task or SHA256SUMS verification |
-| 🟡 | Empty templates file and YAML duplicated per environment | environments drift apart | Extract templates |
-
-## Terraform: structure
-
-| Sev. | Mistake | Symptom | Fix |
-|---|---|---|---|
-| 🔴 | `source` in `Envs/<A>` points to `Modules/<B>` | changes in one environment affect another / are not applied | Same environment, or single versioned modules |
-| 🔴 | The parent reads `module.x.id` while the child exposes `x_output` (object) | `Unsupported attribute` | `module.x.x_output.id` |
-| 🔴 | Root output referencing an undeclared module | `Reference to undeclared module` | Remove it or declare the module |
-| 🔴 | Required resource variable not passed by the module (e.g. `workspaceId`) | `Missing required argument` | Wire it from the sibling resource |
-| 🔴 | A phase creates another phase's resources | duplicated state, cross-phase destroys | Move it to its phase; read it with `data` |
-| 🟠 | `try(module.x[0].attr, null)` with a misspelled `attr` | output always `null`, no error | Check names; use `try` only for the `count = 0` case |
-| 🟠 | The module receives a variable and does not forward it (e.g. tags) | the resource is created without it | Forward it or remove it from the interface |
-| 🟠 | Dependent flag not validated (`module.common[0]` with `enable_common=false`) | `Invalid index` | `validation` / `check` |
-| 🟡 | Providers declared but unused | slower `init`, larger surface | Remove them |
-| 🟡 | Variables without `type` | unexpected coercions | Always set a type |
-| 🟡 | Defaults from another environment (tags, SKUs) | mislabeled resources | Neutral defaults |
-| 🟡 | Unused or buggy "wiring" locals | confusing maintenance | Remove or use them |
-
-## Terraform: naming
-
-| Sev. | Mistake | Symptom | Fix |
-|---|---|---|---|
-| 🟠 | `replace(x, "[^a-z0-9-]", "")` without slashes | invalid characters reach Azure | `"/[^a-z0-9-]/"` |
-| 🟠 | Truncation computed but not used | Storage name > 24 characters | Pass the truncated name |
-| 🟠 | Global name without the instance identifier (e.g. KV without `count_c`) | `already exists` / soft delete blocks it | Include every discriminator |
-| 🟠 | Lookup pattern differs from the one in the phase that creates the resource | `data` not found | One documented pattern per phase |
-| 🟠 | Region not supported for a type | provider error at apply | A dedicated `location` for that type |
-
-## Variables and local environment
-
-| Sev. | Mistake | Symptom | Fix |
-|---|---|---|---|
-| 🟠 | Local `terraform.tfvars` with values that differ from CI (abbreviations, SKUs) | local plan ≠ CI plan | Versioned `.example`; do not override naming |
-| 🟠 | SKU incompatible with the configuration (e.g. dedicated SKU + elastic pool) | error at apply | Variable validation |
-| 🟡 | Pipeline `-var` for undeclared variables | `undeclared variable` | Keep the list in sync (or use a generated tfvars.json) |
+| 🔴 | `terraform apply -auto-approve` without a reviewed plan | unreviewed destructive changes | Plan artifact + approval + apply of that plan |
+| 🟠 | Terraform version differs between CI and local | lock file churn, state upgrades | Pin `required_version` and the CI version |
+| 🟠 | No drift detection | manual portal changes reverted unexpectedly | Scheduled `plan -detailed-exitcode` |
+| 🟠 | Plan/outputs with secrets printed in logs | leaked secrets | Do not echo them; publish them as restricted artifacts |
+| 🟡 | Terraform downloaded without a checksum | non-reproducible, supply-chain risk | Official task or SHA256SUMS verification |
+| 🟡 | Using `-target` routinely to make applies work | hidden dependency bugs | Add the missing reference |
 
 ## Debugging checklist
 
-1. Which working directory, groups and service connection did the run actually use?
-2. Do the earlier phases' resources exist, with the same names?
-3. Does the instance's state container exist, and is it lowercase?
-4. `Unsupported attribute` / `Missing required argument` → output/input contracts between tiers.
-5. Type error on a `-var` → missing variable, or a list/map not in HCL syntax.
-6. `already exists` / invalid name → naming: regex, truncation, uniqueness, region.
-7. Local vs CI differences → local tfvars, Terraform version, lock file.
+1. Run `terraform init -upgrade=false` and `terraform validate` locally, with the CI Terraform version.
+2. `Unsupported attribute` / `Missing required argument` → output and input contracts between tiers.
+3. `Invalid index` → a flag with `count = 0` while something else uses `[0]`.
+4. Type errors → tfvars syntax for lists/maps, or a missing `type`.
+5. `already exists` / invalid name → regex, truncation, uniqueness, soft-deleted Key Vault, region.
+6. Unexpected destroy/recreate → missing `moved {}`, a changed name, or a `ForceNew` attribute.
+7. Plan differs between local and CI → a different var source, Terraform version or lock file.
+8. State lock errors → a previous run was cancelled; check it, then `terraform force-unlock <id>` with care.

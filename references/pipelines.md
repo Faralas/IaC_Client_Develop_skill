@@ -1,152 +1,135 @@
-# Pipelines per phase and environment (Azure DevOps)
+# CI/CD pipeline (Azure DevOps)
 
-One pipeline per **phase × environment**, generated from shared templates. Run manually or
-chained (Region → Plan → Client). The example uses Azure DevOps; the same pattern applies to
-GitHub Actions or GitLab CI.
+One pipeline for the environment, with three stages: **Validate → Plan → Apply**. The approval
+gate is the Apply stage's `environment`, so apply waits for a reviewer after the plan is published.
+The example uses Azure DevOps; the same structure applies to GitHub Actions or GitLab CI.
 
-## What changes per environment
-
-| Element | Develop | QA | UAT | PROD |
-|---|---|---|---|---|
-| Control variable group (backend) | `library-control-tf-develop` | `…-qa` | `…-uat` | `…-prod` |
-| Deployment variable group (SKUs, flags) | `library-deployment-tf-develop` | `…-qa` | `…-uat` | `…-prod` |
-| Service connection | Develop subscription SC | QA | UAT | PROD |
-| Working directory | `Terraform/Envs/Develop/<Phase>` | `…/QA/<Phase>` | `…/UAT/<Phase>` | `…/PROD/<Phase>` |
-| Approval before apply | optional | recommended | required | required + reviewers |
-
-Nothing else should change. If something else does, it is in the wrong place.
-
-## Instance parameters per phase
-
-| Phase | Parameters |
-|---|---|
-| Region | `region`, `regioncode`, `count_r`, `env` |
-| Plan | Region's + `plansize`, `count_p` |
-| Client | Plan's + `tenant_code`, `count_c`, business flags (e.g. `is_internal_tenant`) |
-
-## Phase pipeline (reference)
+## Pipeline
 
 ```yaml
-trigger: none
+trigger:
+  branches: { include: [main] }
+  paths:    { include: [terraform/*, pipelines/*] }
 
-parameters:
-- { name: env,         type: string, values: [develop, qa, uat, prod] }
-- { name: region,      type: string }
-- { name: regioncode,  type: string }
-- { name: count_r,     type: string }
-- { name: plansize,    type: string }
-- { name: count_p,     type: string }
-- { name: tenant_code, type: string }
-- { name: count_c,     type: string }
-- { name: is_internal_tenant, type: boolean, default: false }
+pr:
+  branches: { include: [main] }
 
 variables:
-- group: library-control-tf-${{ parameters.env }}
-- group: library-deployment-tf-${{ parameters.env }}
-- name: terraformWorkingDirectory
-  value: Terraform/Envs/${{ parameters.env }}/Client     # match the real folder's casing
+- group: tf-backend-dev           # backendResourceGroup, backendStorageAccount, backendContainer
+- group: tf-secrets-dev           # Key Vault-linked: secrets exposed as TF_VAR_*
+- name: workingDirectory
+  value: terraform/env
 - name: terraformVersion
   value: 1.14.0
+- name: serviceConnection
+  value: sc-azure-dev
 
 pool: { vmImage: ubuntu-latest }
 
 stages:
+- stage: Validate
+  jobs:
+  - job: Validate
+    steps:
+    - template: templates/terraform-validate.yml
+
 - stage: Plan
+  dependsOn: Validate
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
   jobs:
   - job: Plan
     steps:
-    - template: ../Templates/terraform-plan.yml
-      parameters: { serviceConnection: $(serviceConnection), … }
+    - template: templates/terraform-plan.yml
 
 - stage: Apply
   dependsOn: Plan
+  condition: and(succeeded(), eq(dependencies.Plan.outputs['Plan.plan.hasChanges'], 'true'))
   jobs:
   - deployment: Apply
-    environment: iac-${{ parameters.env }}     # approvals configured on the environment
+    environment: iac-dev              # approvals and checks configured here
     strategy:
       runOnce:
         deploy:
           steps:
-          - template: ../Templates/terraform-apply.yml
-
-- stage: Next
-  dependsOn: Apply
-  condition: and(succeeded(), eq(variables['triggerNext'], 'true'))
-  jobs:
-  - job: Trigger
-    steps:
-    - checkout: none
-    # trigger the next phase or post-IaC with the same instance parameters
+          - checkout: self
+          - template: templates/terraform-apply.yml
 ```
 
-## `terraform-plan.yml` script (inside `AzureCLI@2`, `addSpnToEnvironment: true`)
+For PRs it is also useful to run the plan and post its summary as a PR comment, without applying.
+
+## `terraform-validate.yml`
+
+```bash
+terraform fmt -check -recursive terraform
+cd terraform/env
+terraform init -backend=false -input=false
+terraform validate
+tflint --init && tflint --recursive
+```
+
+## `terraform-plan.yml` (inside `AzureCLI@2`, `addSpnToEnvironment: true`)
 
 ```bash
 set -euo pipefail
-
 export ARM_CLIENT_ID="$servicePrincipalId"
-export ARM_CLIENT_SECRET="$servicePrincipalKey"     # or federated: ARM_USE_OIDC=true
 export ARM_TENANT_ID="$tenantId"
 export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+export ARM_USE_OIDC=true                       # workload identity federation (preferred)
+export ARM_OIDC_TOKEN="$idToken"               # or ARM_CLIENT_SECRET="$servicePrincipalKey"
+export TF_IN_AUTOMATION=true
+export TF_VAR_subscription_id="$ARM_SUBSCRIPTION_ID"
 
-# 1 state container per instance; container names must be lowercase
-CONTAINER_NAME="$(echo "${TENANT_CODE}-${COUNT_C}" | tr '[:upper:]' '[:lower:]')"
-if [ "$(az storage fs exists --account-name "$(controlStorageAccount)" \
-        --name "$CONTAINER_NAME" --auth-mode login --query exists -o tsv)" != "true" ]; then
-  az storage fs create --account-name "$(controlStorageAccount)" \
-     --name "$CONTAINER_NAME" --auth-mode login 1>/dev/null
-fi
+cd "$(workingDirectory)"
+terraform init -input=false \
+  -backend-config="resource_group_name=$(backendResourceGroup)" \
+  -backend-config="storage_account_name=$(backendStorageAccount)" \
+  -backend-config="container_name=$(backendContainer)" \
+  -backend-config="use_azuread_auth=true"
 
-cd "$(terraformWorkingDirectory)"
-terraform init \
-  -backend-config="resource_group_name=$(controlResourceGroup)" \
-  -backend-config="storage_account_name=$(controlStorageAccount)" \
-  -backend-config="container_name=${CONTAINER_NAME}" \
-  -backend-config="key=terraform.tfstate"
-
-# business-derived flags
-[ "$(echo "${IS_INTERNAL_TENANT}" | tr '[:upper:]' '[:lower:]')" = "true" ] \
-  && ENABLE_INTEGRATION_API=false || ENABLE_INTEGRATION_API=true
-
-terraform plan -input=false -out=tfplan \
-  -var "location=${REGION}" \
-  -var "tenant_abbr=${TENANT_CODE}" \
-  -var "instance_count=${COUNT_C}" \
-  -var "enable_integration_api=${ENABLE_INTEGRATION_API}" \
-  -var 'enable_common=$(enable_common)' \
-  -var 'azure_keyVault_skuName=$(azure_keyVault_skuName)'
-  # … remaining -var from the variable group
+set +e
+terraform plan -input=false -lock-timeout=5m -detailed-exitcode -out=tfplan
+rc=$?
+set -e
+[ $rc -eq 1 ] && exit 1
+echo "##vso[task.setvariable variable=hasChanges;isOutput=true]$([ $rc -eq 2 ] && echo true || echo false)"
+terraform show -no-color tfplan > plan.txt
 ```
 
-Publish `tfplan` (and `.terraform.lock.hcl`) as an artifact. The apply stage runs `init` with
-the same backend, downloads the artifact and runs `terraform apply -input=false tfplan`.
+Name the step `plan` so that `Plan.plan.hasChanges` resolves. Publish `tfplan`, `plan.txt`
+and `.terraform.lock.hcl` as the pipeline artifact.
 
-## Export outputs for the next phase / post-IaC
+## `terraform-apply.yml`
 
 ```bash
-terraform output -json > tfoutputs.json
-jq -n --arg env "$ENV" --arg tenant "$TENANT_CODE" --arg count_c "$COUNT_C" \
-      --arg build "$BUILD_BUILDNUMBER" --slurpfile tf tfoutputs.json \
-      '{metadata:{build:$build}, parameters:{env:$env,tenant:$tenant,count_c:$count_c}, terraform_outputs:$tf[0]}' \
-  > values.json
-az storage fs file upload --account-name "$(controlStorageAccount)" --auth-mode login \
-  --file-system "$CONTAINER_NAME" --source values.json --path values.json --overwrite true
+set -euo pipefail
+# same ARM_* exports and terraform init as in the plan
+terraform apply -input=false -lock-timeout=5m tfplan
+terraform output -json > outputs.json      # publish as artifact; do not print it
 ```
 
-Do not print `values.json` to the logs: it may contain sensitive outputs.
+Apply **the downloaded plan file**, never a fresh `terraform apply`. If the state changed
+since the plan, Terraform refuses the stale plan: run the pipeline again.
+
+## Backend
+
+- One storage account + container for the environment's state; key `dev.terraform.tfstate`.
+- Enable blob versioning and soft delete on the storage account, and restrict network access.
+- Authenticate with Entra ID (`use_azuread_auth = true`); the pipeline identity needs
+  **Storage Blob Data Contributor** on the container.
+- Create the backend outside this root (a bootstrap script or a separate root), never from the
+  same state it stores.
 
 ## Pipeline identity permissions
 
-- Contributor (or a custom role) on the subscription or on the phase's RGs.
-- Storage Blob Data Contributor on the control account (`--auth-mode login`).
-- Read access to earlier phases' resources (for the `data` sources).
-- Provider-specific permissions (e.g. to create dedicated capacities).
-- If it creates Key Vaults with an access policy for itself, it becomes a secrets administrator: decide whether that is what you want.
+- Contributor on the target subscription or resource groups (or a custom role).
+- User Access Administrator / RBAC Administrator, scoped down, **only** if the code creates role assignments.
+- Storage Blob Data Contributor on the state container.
+- Read access to any existing resource used through `data` sources.
 
 ## Good practices
 
-- Install Terraform with an official task or verify the checksum; pin the version.
-- Always use `-input=false` in CI.
-- Separate plan and apply, with approval in higher environments.
-- One template per step; environment YAML files only declare parameters and variables.
-- Validate in PRs: `terraform fmt -check`, `terraform validate` and `tflint` for each root.
+- Pin the Terraform version and install it with an official task or a verified checksum.
+- `-input=false` and `TF_IN_AUTOMATION=true` always.
+- Never use `-auto-approve` on a fresh plan; always apply the reviewed artifact.
+- Do not print outputs or plans that contain sensitive values to the logs.
+- Run a scheduled `terraform plan -detailed-exitcode` to detect drift.

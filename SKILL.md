@@ -1,158 +1,151 @@
 ---
 name: iac-terraform
 description: >
-  Guide for structuring and working in Terraform Infrastructure-as-Code repositories
-  organized in three tiers (atomic Resources → Middle Modules → Envs) and in ordered
-  provisioning phases (Region → Plan → Client) for any environment (Develop, QA, UAT,
-  PROD). Use it when creating or reviewing an IaC repo; adding a resource, a middle
-  module, a phase or an environment; wiring phases together; designing naming, variable
-  handling or backend/state; writing or debugging plan/apply CI/CD pipelines; or
-  promoting infrastructure between environments.
+  General-purpose guide for Terraform Infrastructure-as-Code repositories that deploy a
+  single environment (e.g. Dev). Code is organized in three tiers: atomic Resources →
+  Middle Modules (domain building blocks) → one root module for the environment. Use it
+  when creating or reviewing such a repo; adding a resource or a middle module; wiring
+  modules together; designing naming, variables, tfvars, backend/state or providers;
+  writing or debugging the plan/apply CI/CD pipeline; or troubleshooting a failing plan.
 ---
 
-# IaC Terraform — Middle Modules by Phase
+# IaC Terraform — single-environment repository
 
-This skill defines **how to structure** an IaC repository where *middle modules*
-(domain-level intermediate modules) control each phase of cloud provisioning, and
-**in what order** those phases run. It applies to any environment: the environment is a
-parameter, not a code variant.
+This skill defines how to structure and work in a Terraform repository that deploys **one
+environment** (for example `dev`). The repo holds one root module, one state and one
+pipeline. Inside the repo, code is composed in three tiers so it stays reusable and easy to review.
 
 ## When to use
 
-- "Set up the IaC structure for this repo / new project"
-- "Add a resource / a middle module / a phase / an environment"
-- "Which phase does this resource belong to?" / "How does the Client phase consume what Region created?"
+- "Set up the Terraform structure for this repo"
+- "Add a storage account / key vault / app service / database"
+- "Create a middle module for <domain>"
+- "Wire module X's output into module Y"
 - "What should this resource be named?" / "Where does this variable come from?"
-- "Create or review the plan/apply pipeline for <phase> in <environment>"
-- "Promote the infrastructure from Develop to QA/UAT/PROD"
-- "Why is `plan` failing?"
+- "Create or review the plan/apply pipeline"
+- "Why is `terraform plan` failing?"
 
-## Two-axis model
+## The three tiers
 
 ```
-                 TIER (how code is composed)
-                 Resources ──► Middle Modules ──► Envs/<Env>/<Phase>  (root module)
-
-PHASE (provi-    1. Region  ─ regional shared foundation (network, RG, SQL Server, pools, observability)
-sioning order)   2. Plan    ─ shared compute capacity by size (App Service Plan, node pools)
-                 3. Client  ─ per-client/tenant workload (apps, databases, storage, secrets)
+Resources ─────────► Middle Modules ─────────► Root (the environment)
+one resource each    one domain each          backend, providers, naming,
+no logic             composes Resources       flags, wiring, outputs
 ```
 
-- **Resources** (`Terraform/Resources/<provider>_<type>/`): one resource, no business logic,
-  **a single object output**.
-- **Middle Modules** (`Terraform/Modules/<Phase>_IaC_<Domain>/`): compose Resources by
-  domain (Common, Application, Data, Monitoring…). They are the unit each phase turns on or
-  off. No backend or providers.
-- **Envs** (`Terraform/Envs/<Env>/<Phase>/`): root modules. The only place with `backend.tf`,
-  `providers.tf`, naming (`local.tf`) and feature flags. One per phase and environment.
+| Tier | Folder | Contains | Never contains |
+|---|---|---|---|
+| **Resources** | `terraform/resources/<provider>_<type>/` | One resource, its variables, **one object output** | backend, providers, naming logic |
+| **Middle Modules** | `terraform/modules/<domain>/` | Several Resources of one domain (network, data, app…) and their internal wiring | backend, providers, environment values |
+| **Root** | `terraform/env/` | `backend.tf`, `providers.tf`, `variables.tf`, `locals.tf`, `main.tf`, `outputs.tf`, `terraform.tfvars` | resource blocks for things a module already covers |
 
-Details and dependency tree: [references/architecture-and-phases.md](references/architecture-and-phases.md).
+Details, dependency graph and ordering: [references/architecture.md](references/architecture.md).
 
 ## Critical rules
 
-1. **Phases run in order and only depend backwards**: Region → Plan → Client.
-   A phase never creates or modifies another phase's resources; it only *reads* them
-   (data sources by deterministic name, or `terraform_remote_state`).
-2. **One state per phase and instance.** Client: one state per client; Region: per region;
-   Plan: per plan. Never mix phases in one state.
-3. **The environment is a parameter.** The same Resources and Middle Modules serve every
-   environment; what changes is `Envs/<Env>/…`, the variable group, the service connection
-   and the subscription. If you duplicate modules per environment, every `source` must point
-   to the folder **of the same environment**, and you must verify it on every promotion.
-4. **A pipeline must target the environment in its name**: working directory, variable
-   groups, service connection and backend. This is the most expensive copy-paste mistake.
-5. **Explicit output contract**: Resources expose `<type>_output = { id, name, … }`; middle
-   modules read `module.<x>.<type>_output.<attr>`; Envs read middle-module outputs with
-   `try(module.<m>[0].<out>, null)`. Every reference must exist in the child.
-6. **Naming is deterministic and computed only in `Envs/*/local.tf`.** Later phases rebuild
-   the names of earlier phases' resources from the same inputs.
-7. **One feature flag per middle module** (`enable_<module>` + `count`). If one module indexes
-   another (`module.common[0]`), document and validate the dependency between flags.
-8. **`*.tfvars` files are not versioned**: in CI, values arrive via `-var`/`TF_VAR_*` and the
-   defaults in `variables.tf`. A local plan with `terraform.tfvars` is not comparable to CI.
+1. **One environment, one root, one state.** The root in `terraform/env/` is the only place
+   with a backend and provider configuration. If the environment grows too big, split it
+   into several roots with separate states, and connect them with `terraform_remote_state` or `data` sources.
+2. **Dependencies flow one way: Root → Middle Modules → Resources.** A Resource never
+   calls a module; a middle module never reads another middle module directly. The root
+   passes outputs from one module as inputs to another.
+3. **Order comes from references, not from file order.** Terraform builds the graph from
+   the expressions you use. Prefer passing outputs (`module.network.subnet_id`) over
+   `depends_on`, and use `depends_on` only for dependencies that have no data flow.
+4. **Explicit output contract.** A Resource exposes `<type>_output = { id, name, … }`; a
+   middle module reads `module.<x>.<type>_output.<attr>` and re-exports flat outputs; the
+   root reads module outputs (`try(module.<m>[0].<out>, null)` when the module uses `count`).
+   Every referenced attribute must exist in the child.
+5. **Names are computed once, in `locals.tf`.** Deterministic, lowercase, sanitized with a regex
+   between slashes, and truncated to each type's limit.
+6. **Environment values live in the root**: `terraform.tfvars` holds non-secret configuration
+   (versioned), CI injects secrets through `TF_VAR_*`, and `variables.tf` defaults hold constants.
+   Modules get everything through variables and never hard-code environment values.
+7. **One feature flag per optional middle module** (`enable_<domain>` + `count`). If one
+   module needs another, validate that the flags are consistent.
+8. **Always plan before apply**, and in CI apply exactly the reviewed plan file.
 
 ## Folder structure
 
 ```
 <iac-repo>/
-├─ Pipelines/
-│  ├─ Templates/                         reusable templates (init/plan/apply, outputs)
-│  └─ <Env>/                             Develop | QA | UAT | PROD
-│     ├─ regionIac<Env>.yml              phase 1
-│     ├─ planIac<Env>.yml                phase 2
-│     └─ clientIac<Env>.yml              phase 3
-└─ Terraform/
-   ├─ Resources/<provider>_<type>/       main|<type>.tf · variables.tf · output.tf
-   ├─ Modules/<Phase>_IaC_<Domain>/      main.tf · variables.tf · output.tf
-   └─ Envs/<Env>/<Phase>/                backend.tf · providers.tf · variables.tf
-                                         local.tf · main.tf · output.tf
+├─ .gitignore                 .terraform/, *.tfstate*, *.tfplan, crash.log, override.tf, *.auto.tfvars (local)
+├─ README.md                  what the environment contains and how to deploy it
+├─ pipelines/
+│  ├─ azure-pipelines.yml     PR validation + plan + approval + apply
+│  └─ templates/              terraform-plan.yml, terraform-apply.yml
+└─ terraform/
+   ├─ resources/<provider>_<type>/   main.tf · variables.tf · outputs.tf
+   ├─ modules/<domain>/              main.tf · variables.tf · outputs.tf · README.md
+   └─ env/                           backend.tf · providers.tf · versions.tf
+                                     variables.tf · locals.tf · main.tf · outputs.tf
+                                     terraform.tfvars · .terraform.lock.hcl
 ```
 
 Details and conventions: [references/folder-structure.md](references/folder-structure.md).
 File templates: [references/templates.md](references/templates.md).
 
-## Flow of a phase deployment
+## Deployment flow
 
-1. The pipeline receives instance parameters (region, codes, size, client…).
-2. It authenticates with the environment's service connection and exports `ARM_*`.
-3. It ensures the instance's state container exists and runs `terraform init` with `-backend-config`.
-4. It computes derived flags (e.g. enable a module depending on the client type).
-5. `terraform plan -out=tfplan` → artifact.
-6. Approval (`environment`) → `terraform apply tfplan`.
-7. It exports `terraform output -json` next to the state for later phases or pipelines.
-8. Optional: it triggers the next phase or the post-deployment pipeline.
+1. A PR runs `fmt -check`, `init -backend=false`, `validate` and `tflint`.
+2. On merge (or a manual run) the pipeline authenticates, runs `init` against the remote
+   backend, and runs `plan -out=tfplan`, which it publishes as an artifact.
+3. An approval gate (pipeline `environment`) shows the plan to reviewers.
+4. Apply runs `terraform apply tfplan`, using the same plan and the same Terraform and provider versions.
+5. `terraform output -json` is exported as an artifact for downstream consumers.
 
 Details: [references/pipelines.md](references/pipelines.md).
 
 ## Variables
 
-| Source | Purpose | Syntax (Azure DevOps) |
+| Source | Purpose | Example |
 |---|---|---|
-| Run parameters | instance identity (client, region, codes, size) | `${{ parameters.x }}` → `env:` → `${X}` |
-| Per-environment variable groups | SKUs, flags, retention, control backend | `$(x)` |
-| Computed in the pipeline | state container name, derived flags | bash |
-| `variables.tf` defaults | constants (org, abbreviations) | — |
-| `locals` | names and wiring | — |
+| `terraform.tfvars` (versioned) | non-secret environment configuration | `location`, SKUs, flags, address spaces |
+| `TF_VAR_*` / pipeline secrets | secrets and identity-dependent values | admin passwords, object IDs |
+| `variables.tf` defaults | constants and safe defaults | abbreviations, retention |
+| `locals.tf` | computed names, tags, wiring maps | `local.names.kv` |
+| `data` sources | existing resources not managed here | client config, shared DNS zone |
 
-Full matrix and typing pitfalls: [references/variables.md](references/variables.md).
+Full chain and pitfalls: [references/variables.md](references/variables.md).
 
 ## Naming
 
-Base pattern: `<abbr>-<org>-<regionCode>-<tenantAbbr>-<instance>`, computed in `local.tf`
-with `lower()` + `format()` and sanitized with a regex **between slashes**
-(`replace(x, "/[^a-z0-9-]/", "")`). Alphanumeric types (Storage, some capacities) have no
+Base pattern: `<abbr>-<workload>-<env>-<regionCode>[-<instance>]`, e.g. `kv-shop-dev-eus-01`.
+It is computed in `locals.tf` with `lower()` + `format()` and sanitized with
+`replace(x, "/[^a-z0-9-]/", "")`. Types that only allow alphanumerics (Storage, ACR) drop the
 hyphens and are truncated to their limit.
-Per-type rules and cross-phase lookup names: [references/naming.md](references/naming.md).
+Rules per type: [references/naming.md](references/naming.md).
 
 ## Recipes
 
-**Add a resource to a phase**
-1. Create or reuse `Resources/<provider>_<type>` with a single object output.
-2. Add it to the domain's middle module and expose flat outputs read from the object.
-3. Compute its name in `Envs/<Env>/<Phase>/local.tf`.
-4. Declare variables with defaults in the root; pass them to the module in `main.tf`.
-5. If they vary per environment: add a `-var` in the pipeline and the variable in the group of **every** environment.
-6. Expose the output in `Envs/.../output.tf` with `try()`.
+**Add a resource**
+1. Reuse or create `terraform/resources/<provider>_<type>/` with a single object output.
+2. Add it to the middle module of its domain, and re-export flat outputs (`<x>_id`, `<x>_name`).
+3. Add its name to `locals.tf`.
+4. Add any new variables to the module and the root (with a default if it is safe), and set
+   environment values in `terraform.tfvars`.
+5. Pass the inputs in the root `main.tf`, wiring other modules' outputs instead of hard-coded IDs.
+6. Expose what consumers need in the root `outputs.tf`.
+7. `terraform fmt`, `validate`, `plan`, then review the plan.
 
-**Add a middle module**: `Modules/<Phase>_IaC_<Domain>/` + an `enable_<domain>` flag +
-a `module` block with `count` and `depends_on` in the root + an aggregated output.
+**Add a middle module**: create `terraform/modules/<domain>/`, compose the Resources, define
+variables and outputs, add an `enable_<domain>` flag if it is optional, call it from the
+root, and add an aggregated root output.
 
-**Add a phase**: decide which phases it reads (earlier ones only), its state granularity,
-its naming and its pipeline; document the order.
+**Use an existing resource you do not manage**: use a `data` source in the root, and pass
+its attributes to the module. Never `import` something another team owns.
 
-**Add or promote an environment**: copy `Envs/<SourceEnv>` → `Envs/<TargetEnv>`, adjust
-`source` if modules are per environment, create the variable groups and service connection,
-and generate the pipelines from the template. Deploy the phases **in order**.
+**Rename or move a resource without recreating it**: add a `moved {}` block in the root
+(or in the module) in the same change.
 
 ## Checklist before accepting a change
 
-- [ ] The pipeline uses the working directory, variable groups, service connection and backend of the right environment.
-- [ ] No `source` crosses environments by mistake.
-- [ ] The phase only reads resources from earlier phases, and those names match the ones created there.
+- [ ] Only the root has backend and provider configuration; modules declare `required_providers` only.
 - [ ] Every `module.X.<attr>` exists in the child, and every required variable receives a value.
-- [ ] Every pipeline `-var` is declared, and every variable without a default is passed.
-- [ ] Names respect their type's length limit and charset, and global uniqueness where it applies.
-- [ ] There is a reviewed plan before apply, and an approval gate in higher environments.
-- [ ] `terraform fmt -check` and `terraform validate` pass on every root you touched.
+- [ ] Dependencies are expressed through references; `depends_on` only where unavoidable.
+- [ ] Names respect each type's length limit, charset and global uniqueness.
+- [ ] No secrets in `terraform.tfvars`, in defaults or in outputs without `sensitive = true`.
+- [ ] Renames and moves have `moved {}` blocks; the plan shows no unexpected destroy.
+- [ ] `terraform fmt -check`, `terraform validate` and `tflint` are clean, and the plan was reviewed.
 
 Common mistakes with symptom and fix: [references/anti-patterns.md](references/anti-patterns.md).

@@ -1,41 +1,54 @@
 # Naming
 
-## Patterns per phase
+## Pattern
 
-| Phase | Pattern | Example (`org=acme rc=eus count_r=01 size=s count_p=02 tenant=ctx count_c=0001`) |
+`<abbr>-<workload>-<env>-<regionCode>[-<instance>]`, using Microsoft CAF abbreviations.
+
+Example with `workload=shop env=dev region_code=eus instance=01`:
+
+| Resource | Abbr | Name |
 |---|---|---|
-| Region | `<abbr>-<org>-<rc>-<count_r>` | `rg-acme-eus-01`, `sql-acme-eus-01`, `sqlep-sql-acme-eus-01` |
-| Plan | `<abbr>-<org>-<rc>-<size>-<count_p>` | `rg-acme-eus-s-02`, `plan-acme-eus-s-02` |
-| Client | `<abbr>-<org>-<rc>-<tenant>-<count_c>` | `rg-acme-eus-ctx-0001`, `appi-acme-eus-ctx-0001` |
-| Client (global apps) | `<abbr>-<org>-<segment>-<tenant>-<count_c>` | `app-acme-web-ctx-0001` |
+| Resource group | `rg` | `rg-shop-dev-eus` |
+| Log Analytics | `log` | `log-shop-dev-eus` |
+| Application Insights | `appi` | `appi-shop-dev-eus` |
+| Virtual network | `vnet` | `vnet-shop-dev-eus` |
+| Subnet | `snet` | `snet-app-shop-dev-eus` |
+| Key Vault | `kv` | `kv-shop-dev-eus-01` |
+| Storage account | `st` | `stshopdeveus01` |
+| App Service Plan | `asp` | `asp-shop-dev-eus` |
+| Web App | `app` | `app-shop-dev-eus-01` |
+| Function App | `func` | `func-shop-dev-eus-01` |
+| SQL Server / DB | `sql` / `sqldb` | `sql-shop-dev-eus-01` / `sqldb-shop-dev-eus` |
+| Container registry | `cr` | `crshopdeveus01` |
+| Managed identity | `id` | `id-shop-dev-eus` |
 
-Later phases **rebuild** the names of earlier phases from the same inputs (`rc`, `count_r`,
-`size`, `count_p`) to perform lookups. If you change a pattern in Region, change it in the
-`local.tf` of Plan and Client too, or move to `remote_state`.
-
-## Name classes (Azure)
+## Name classes
 
 | Class | Charset | Types | How to build |
 |---|---|---|---|
-| STANDARD | `a-z0-9-` | RG, App Insights, LAW, SQL DB, Web/Function App, Plan | `replace(…, "/[^a-z0-9-]/", "")` |
-| ALPHANUM | `a-z0-9` | Storage Account (3–24), ACR (5–50), Fabric Capacity (`^[a-z][a-z0-9]*$`) | `substr(replace(…, "/[^a-z0-9]/", ""), 0, N)` |
-| SHORT | `a-z0-9-`, ≤ 24 | Key Vault (3–24, global) | `substr(…, 0, 24)` with no trailing hyphen |
+| STANDARD | `a-z0-9-` | RG, LAW, App Insights, VNet, Plan, SQL DB, Web/Function App | `replace(s, "/[^a-z0-9-]/", "")` |
+| ALPHANUM | `a-z0-9` | Storage account (3–24), Container registry (5–50) | `substr(replace(s, "/[^a-z0-9]/", ""), 0, N)` |
+| SHORT | `a-z0-9-`, ≤ 24, starts with a letter, no trailing hyphen | Key Vault (3–24) | `substr(s, 0, 24)` + `trimsuffix(…, "-")` |
 
 ## Global uniqueness
 
-Types with a global DNS name (Storage, Key Vault, Web/Function App, SWA, ACR, SQL Server):
-the name must include **everything** that distinguishes the instance (tenant **and** `count_c`,
-or `rc`). Key Vault also keeps its name while soft-deleted; with purge protection on you
-cannot reuse it during the retention period.
+Storage accounts, Key Vaults, Web/Function Apps, Static Web Apps, container registries and SQL
+servers have globally unique DNS names. Add the `instance` suffix, or a short deterministic
+hash (`substr(sha1("${var.subscription_id}${var.workload}"), 0, 4)`), to them. Do not use
+`random_string` for names unless you accept that the name is unknown until apply.
+
+Key Vault keeps its name while soft-deleted; with purge protection on, you cannot reuse it
+until the retention period ends. Plan names so a destroy/recreate in dev does not collide.
 
 ## Implementation rules
 
-- Normalize every input with `lower()` before `format()`.
-- **Terraform regex goes between slashes**: `replace(s, "/[^a-z0-9-]/", "")`. Without slashes
+- Compute every name in `locals.tf` as a map (`local.names.<key>`) and pass it to the modules;
+  modules never build names.
+- Normalize inputs with `lower()` before `format()`.
+- **Regex in Terraform goes between slashes**: `replace(s, "/[^a-z0-9-]/", "")`. Without slashes
   (`"[^a-z0-9-]"`) it is a literal replacement and cleans nothing.
-- Truncate **after** sanitizing, and apply the truncation to the name you actually pass to the module.
-- Declare abbreviations as variables with defaults (so they can be adjusted), but **do not**
-  override them per environment: names must be predictable across environments.
-- Export the computed names as root outputs: it makes lookups easier to debug.
-- If some region has restrictions (e.g. Static Web Apps only in some regions), use a
-  dedicated `location` variable for that type.
+- Sanitize first, truncate second, and pass the truncated value: the one you actually use.
+- Add `validation` blocks on module name variables with the type's regex, so a bad name fails
+  at plan time instead of at the API.
+- Export the name map as a root output: it makes debugging and documentation easier.
+- Some types are limited to certain regions (e.g. Static Web Apps). Give them their own `location` variable.

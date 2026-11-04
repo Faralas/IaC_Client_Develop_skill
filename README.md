@@ -1,9 +1,10 @@
 # iac-terraform
 
 An AI agent skill ([Agent Skills](https://skills.sh) format) for structuring and working in
-**Terraform Infrastructure-as-Code** repositories built on **Middle Modules** that control the
-phases of cloud provisioning, executed in order (**Region → Plan → Client**), for any
-environment (**Develop / QA / UAT / PROD**).
+**Terraform Infrastructure-as-Code repositories that deploy a single environment** (for
+example `dev`). Code is organized in three tiers: atomic **Resources** → **Middle Modules**
+(domain building blocks) → one **root module** with the environment's backend, providers,
+naming and wiring.
 
 ## Install
 
@@ -48,17 +49,18 @@ npx skills remove iac-terraform
 
 | File | What it covers |
 |---|---|
-| [SKILL.md](SKILL.md) | Tier × phase model, critical rules, structure, flow, variables, naming, recipes and checklist |
-| [references/architecture-and-phases.md](references/architecture-and-phases.md) | Resources → Middle Modules → Envs tiers, phases and their order, dependency tree, how phases connect |
-| [references/folder-structure.md](references/folder-structure.md) | Folder tree and naming conventions for files, variables and outputs |
-| [references/templates.md](references/templates.md) | HCL templates per tier (resource, middle module, root module) |
-| [references/pipelines.md](references/pipelines.md) | Pipelines per phase × environment: parameters, variable groups, backend, plan/apply, outputs |
-| [references/variables.md](references/variables.md) | Variable chain, classification, example mapping, typing pitfalls, flags |
-| [references/naming.md](references/naming.md) | Patterns per phase, name classes, global uniqueness, regex |
+| [SKILL.md](SKILL.md) | Three-tier model, critical rules, folder structure, deployment flow, variables, naming, recipes, checklist |
+| [references/architecture.md](references/architecture.md) | Tiers, typical middle modules, dependency graph, ordering via references, when to split the root, providers |
+| [references/folder-structure.md](references/folder-structure.md) | Folder tree, `.gitignore`, naming conventions for folders, variables and outputs |
+| [references/templates.md](references/templates.md) | HCL templates for a Resource, a middle module and the root |
+| [references/pipelines.md](references/pipelines.md) | Validate → plan → approval → apply pipeline, backend and identity permissions |
+| [references/variables.md](references/variables.md) | Variable chain and precedence, where each value goes, variable design, flags, tags |
+| [references/naming.md](references/naming.md) | Naming pattern, name classes, global uniqueness, implementation rules |
 | [references/anti-patterns.md](references/anti-patterns.md) | Common mistakes with symptom and fix, debugging checklist |
 
 ## Scope
 
-- Terraform with Azure providers (`azurerm`, `azapi`); the model applies to other clouds.
-- CI/CD with Azure DevOps Pipelines; the same pattern works for GitHub Actions or GitLab CI.
-- Any environment: the environment is a parameter, not a code variant.
+- Terraform with Azure providers (`azurerm`, `azapi`); the structure applies to other clouds.
+- CI/CD examples use Azure DevOps Pipelines; the same stages work in GitHub Actions or GitLab CI.
+- One environment per repository (one root, one state). For larger environments, see
+  "When to split the root" in [references/architecture.md](references/architecture.md).
